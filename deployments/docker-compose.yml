@@ -1,0 +1,95 @@
+version: "3.9"
+
+services:
+  # --- PostgreSQL: Code Knowledge Graph ---
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: code_review
+      POSTGRES_PASSWORD: code_review
+      POSTGRES_DB: code_review
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./migrations:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U code_review"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # --- Redis: Summary Cache ---
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # --- vLLM Model Server (optional, requires GPU) ---
+  vllm:
+    image: vllm/vllm-openai:latest
+    ports:
+      - "8000:8000"
+    environment:
+      - HF_HOME=/model_cache
+    volumes:
+      - model_cache:/model_cache
+    command:
+      - "--model"
+      - "deepseek-ai/deepseek-coder-6.7b-instruct"
+      - "--max-model-len"
+      - "8192"
+      - "--gpu-memory-utilization"
+      - "0.90"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    profiles:
+      - gpu  # Only start with: docker compose --profile gpu up
+
+  # --- Code Review Agent API ---
+  agent:
+    build:
+      context: .
+      dockerfile: deployments/Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      DATABASE_URL: postgresql://code_review:code_review@postgres:5432/code_review
+      REDIS_URL: redis://redis:6379/0
+      VLLM_API_URL: http://vllm:8000/v1
+      VLLM_MODEL_NAME: deepseek-ai/deepseek-coder-6.7b-instruct
+      LLM_TIMEOUT_SECONDS: "5"
+      LLM_MAX_RETRIES: "3"
+      LOG_LEVEL: INFO
+      CI_MODE: "false"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # --- Frontend Web UI ---
+  frontend:
+    build:
+      context: .
+      dockerfile: deployments/Dockerfile.frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      - agent
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  model_cache:

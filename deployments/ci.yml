@@ -1,0 +1,110 @@
+name: Code Review Agent CI
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust-build:
+    name: Build Rust Analyzer
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            rust_analyzer/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('rust_analyzer/Cargo.lock') }}
+
+      - name: Build release
+        run: cd rust_analyzer && cargo build --release
+
+      - name: Run Rust tests
+        run: cd rust_analyzer && cargo test --release
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-analyzer-so
+          path: rust_analyzer/target/release/librust_analyzer.so
+
+  python-test:
+    name: Python Tests
+    runs-on: ubuntu-latest
+    needs: rust-build
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt pytest pytest-asyncio pytest-cov
+
+      - name: Download Rust binary
+        uses: actions/download-artifact@v4
+        with:
+          name: rust-analyzer-so
+
+      - name: Run tests
+        run: pytest tests/ -v --cov=src --cov-report=xml
+
+  review-demo:
+    name: Self-Review Demo
+    runs-on: ubuntu-latest
+    needs: python-test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install agent
+        run: pip install -r requirements.txt
+
+      - name: Download Rust binary
+        uses: actions/download-artifact@v4
+        with:
+          name: rust-analyzer-so
+
+      - name: Run self-review
+        run: |
+          git diff origin/main...HEAD > /tmp/changes.diff
+          python -c "
+          import asyncio
+          from src.reasoning_engine.reasoning_loop import ReviewOrchestrator
+          with open('/tmp/changes.diff') as f:
+              diff = f.read()
+          async def review():
+              orch = ReviewOrchestrator()
+              await orch.run_review('ci-self-review', diff)
+          asyncio.run(review())
+          "
+
+      - name: Post review summary
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            // Output SARIF or summary comment on PR
