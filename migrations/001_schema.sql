@@ -79,7 +79,7 @@ CREATE INDEX idx_taint_symbol ON taint_summaries(symbol_id);
 
 -- 5. 审查记录表 (Review Records)
 CREATE TABLE IF NOT EXISTS review_records (
-    id              BIGSERIAL PRIMARY KEY,
+    id              VARCHAR(64) PRIMARY KEY,
     mr_id           VARCHAR(256),
     repo_url        VARCHAR(1024),
     branch_name     VARCHAR(256),
@@ -105,7 +105,7 @@ CREATE INDEX idx_review_created ON review_records(created_at);
 -- 6. 问题发现记录表 (Issue/Findings)
 CREATE TABLE IF NOT EXISTS findings (
     id              BIGSERIAL PRIMARY KEY,
-    review_id       BIGINT NOT NULL REFERENCES review_records(id) ON DELETE CASCADE,
+    review_id       VARCHAR(64) NOT NULL REFERENCES review_records(id) ON DELETE CASCADE,
     rule_id         VARCHAR(128),
     category        VARCHAR(64) NOT NULL,   -- security, performance, logic, style, api_compat, test_quality
     severity        VARCHAR(16) NOT NULL,   -- critical, major, minor, info

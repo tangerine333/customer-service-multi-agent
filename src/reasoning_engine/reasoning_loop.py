@@ -5,15 +5,22 @@ The core reasoning engine that:
 2. Runs deterministic rules (Stage 1 & 2 of the funnel)
 3. Invokes LLM for ambiguous cases (Stage 3)
 4. Generates fix suggestions and auto-fix patches
+
+Architecture note:
+- Symbol extraction & call graph: delegates to Rust engine via rust_bridge
+  (when compiled PyO3 lib is available; falls back to Python regex otherwise)
+- Rule matching & LLM orchestration: Python native
 """
 
 import logging
+import re
 import time
 from datetime import datetime, timezone
 from typing import Optional
 
 from .rules.engine import RuleEngine
 from .models.backend import ModelBackend
+from .rust_bridge import get_analyzer, is_rust_available
 from ..graph_store.postgres import save_review, save_findings, update_review_status
 from ..fixer.auto_fixer import AutoFixer
 
@@ -27,6 +34,8 @@ class ReviewOrchestrator:
         self.rule_engine = RuleEngine()
         self.model = ModelBackend()
         self.fixer = AutoFixer()
+        self.analyzer = get_analyzer()  # Rust-backed (falls back to Python)
+        logger.info("ReviewOrchestrator initialized (rust=%s)", is_rust_available())
 
     async def run_review(
         self,
@@ -48,6 +57,14 @@ class ReviewOrchestrator:
         try:
             # Parse diff into structured representation
             files = self._parse_diff(diff_content, language)
+
+            # Extract symbols via Rust engine (or Python fallback)
+            for file_info in files:
+                full_source = "\n".join(file_info.get("added_lines", []))
+                if full_source.strip():
+                    symbols = self.analyzer.parse_file(file_info["path"], full_source)
+                    file_info["symbols"] = symbols
+                    logger.debug("File %s: %d symbols extracted", file_info["path"], len(symbols))
 
             # === Stage 1: Deterministic rule matching ===
             stage1_findings = self.rule_engine.match_deterministic(files)
@@ -120,41 +137,58 @@ class ReviewOrchestrator:
             await update_review_status(review_id=review_id, status="failed")
 
     def _parse_diff(self, diff_content: str, language: Optional[str] = None) -> list[dict]:
-        """Parse unified diff into structured file representations."""
+        """Parse unified diff into structured file representations.
+
+        Handles the standard unified diff format:
+            diff --git a/path.py b/path.py
+            --- a/path.py
+            +++ b/path.py
+            @@ -1,3 +1,4 @@
+             unchanged line
+            +added line
+            -removed line
+        """
         files = []
         current_file = None
         current_additions = []
         current_removals = []
 
         for line in diff_content.split("\n"):
-            if line.startswith("diff --git") or line.startswith("---") and current_file:
-                if current_file:
-                    files.append({
-                        "path": current_file,
-                        "added_lines": current_additions,
-                        "removed_lines": current_removals,
-                        "language": language or self._guess_language(current_file),
-                    })
+            # New file section: save previous and reset
+            if line.startswith("diff --git "):
+                if current_file is not None:
+                    files.append(self._make_file_entry(current_file, current_additions,
+                                                       current_removals, language))
                 current_file = None
                 current_additions = []
                 current_removals = []
 
-            if line.startswith("+++ b/"):
+            # Target file path
+            elif line.startswith("+++ b/"):
                 current_file = line[6:]
+
+            # Added line
             elif line.startswith("+") and not line.startswith("+++"):
                 current_additions.append(line[1:])
+
+            # Removed line
             elif line.startswith("-") and not line.startswith("---"):
                 current_removals.append(line[1:])
 
-        if current_file:
-            files.append({
-                "path": current_file,
-                "added_lines": current_additions,
-                "removed_lines": current_removals,
-                "language": language or self._guess_language(current_file),
-            })
+        # Don't forget the last file
+        if current_file is not None:
+            files.append(self._make_file_entry(current_file, current_additions,
+                                               current_removals, language))
 
         return files
+
+    def _make_file_entry(self, path, additions, removals, language):
+        return {
+            "path": path,
+            "added_lines": additions,
+            "removed_lines": removals,
+            "language": language or self._guess_language(path),
+        }
 
     def _guess_language(self, filepath: str) -> str:
         ext_map = {

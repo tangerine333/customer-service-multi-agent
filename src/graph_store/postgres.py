@@ -44,7 +44,7 @@ async def save_review(
     async with pool.acquire() as conn:
         await conn.execute(
             """INSERT INTO review_records (id, mr_id, review_status, repo_url, commit_sha)
-               VALUES (substring($1 from 1 for 12)::bigint, $2, $3, $4, $5)
+               VALUES ($1, $2, $3, $4, $5)
                ON CONFLICT DO NOTHING""",
             review_id, mr_id, status, repo_url, commit_sha,
         )
@@ -71,7 +71,7 @@ async def update_review_status(
                  major_count = $5, minor_count = $6, info_count = $7,
                  files_analyzed = $8, analysis_time_ms = $9, llm_calls = $10,
                  completed_at = $11
-               WHERE id = substring($1 from 1 for 12)::bigint""",
+               WHERE id = $1""",
             review_id, status, total_issues, critical_count,
             major_count, minor_count, info_count,
             files_analyzed, analysis_time_ms, llm_calls,
@@ -83,7 +83,7 @@ async def get_review_by_id(review_id: str) -> Optional[dict]:
     pool = await get_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT * FROM review_records WHERE id = substring($1 from 1 for 12)::bigint",
+            "SELECT * FROM review_records WHERE id = $1",
             review_id,
         )
         if not row:
@@ -154,15 +154,7 @@ async def list_reviews(
 async def save_findings(review_id: str, findings: list[dict]):
     pool = await get_pool()
     async with pool.acquire() as conn:
-        # Get the internal review id
-        row = await conn.fetchrow(
-            "SELECT id FROM review_records WHERE id = substring($1 from 1 for 12)::bigint",
-            review_id,
-        )
-        if not row:
-            return
-        internal_id = row["id"]
-
+        # Save findings using the review_id directly
         for finding in findings:
             await conn.execute(
                 """INSERT INTO findings (
@@ -170,7 +162,7 @@ async def save_findings(review_id: str, findings: list[dict]):
                      file_path, line_start, line_end, suggestion, auto_fix_code,
                      llm_confidence, filter_stage
                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)""",
-                internal_id,
+                review_id,
                 finding.get("rule_id", ""),
                 finding.get("category", "unknown"),
                 finding.get("severity", "info"),

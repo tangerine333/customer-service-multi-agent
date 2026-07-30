@@ -40,6 +40,10 @@ class RuleEngine:
         """Run all deterministic rules against parsed files.
 
         Returns findings that pass Stage 1 (deterministic pattern matching).
+
+        Note: Rules with multi-line patterns (containing \\n) are matched against
+        the full file content, not individual lines. Single-line patterns are
+        matched line-by-line for precise location reporting.
         """
         findings = []
 
@@ -47,9 +51,10 @@ class RuleEngine:
             language = file_info.get("language", "unknown")
             file_path = file_info.get("path", "")
 
-            # Combine added and removed lines for analysis
             lines = file_info.get("added_lines", [])
-            code = "\n".join(lines) if lines else ""
+            if not lines:
+                continue
+            code = "\n".join(lines)
 
             for rule in self.rules:
                 if not rule.get("is_enabled", True):
@@ -57,7 +62,6 @@ class RuleEngine:
                 if not rule.get("is_deterministic", True):
                     continue
 
-                # Language filter
                 rule_lang = rule.get("language", "all")
                 if rule_lang != "all" and rule_lang != language:
                     continue
@@ -66,28 +70,41 @@ class RuleEngine:
                 if not compiled:
                     continue
 
-                for i, line in enumerate(lines):
-                    match = compiled.search(line)
-                    if match:
-                        findings.append({
-                            "rule_id": rule["rule_id"],
-                            "category": rule["category"],
-                            "severity": rule["severity"],
-                            "title": f"[{rule['rule_id']}] {rule['name']}",
-                            "description": rule.get("description", ""),
-                            "file_path": file_path,
-                            "line_start": i + 1,
-                            "line_content": line,
-                            "snippet": code,
-                            "language": language,
-                            "is_deterministic": True,
-                            "filter_stage": "stage1_deterministic",
-                            "llm_confidence": 1.0,
-                            "cwe_id": rule.get("cwe_id"),
-                            "owasp_category": rule.get("owasp_category"),
-                        })
+                pattern = rule.get("pattern", "")
+
+                # Multi-line patterns: match against full file content
+                if "\\n" in pattern or "\n" in pattern:
+                    for match in compiled.finditer(code):
+                        line_num = code[:match.start()].count("\n") + 1
+                        findings.append(self._make_finding(rule, file_path, line_num,
+                                                            lines[min(line_num - 1, len(lines) - 1)] if lines else "",
+                                                            code, language))
+                else:
+                    # Single-line patterns: match line by line
+                    for i, line in enumerate(lines):
+                        if compiled.search(line):
+                            findings.append(self._make_finding(rule, file_path, i + 1, line, code, language))
 
         return findings
+
+    def _make_finding(self, rule, file_path, line_num, line_content, full_code, language):
+        return {
+            "rule_id": rule["rule_id"],
+            "category": rule["category"],
+            "severity": rule["severity"],
+            "title": f"[{rule['rule_id']}] {rule['name']}",
+            "description": rule.get("description", ""),
+            "file_path": file_path,
+            "line_start": line_num,
+            "line_content": line_content,
+            "snippet": full_code,
+            "language": language,
+            "is_deterministic": True,
+            "filter_stage": "stage1_deterministic",
+            "llm_confidence": 1.0,
+            "cwe_id": rule.get("cwe_id"),
+            "owasp_category": rule.get("owasp_category"),
+        }
 
     def get_rule(self, rule_id: str) -> Optional[dict]:
         """Retrieve a single rule by ID."""

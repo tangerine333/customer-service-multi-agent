@@ -13,6 +13,8 @@ pub use summary_cache::SummaryCache;
 use crate::graph::dataflow::{DataFlowGraph, Definition, ValueSource};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 
 /// Taint source types (where untrusted data enters the system)
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -271,7 +273,11 @@ impl TaintAnalyzer {
             file_path: String::new(),
             params: Vec::new(),
             return_tainted,
-            hash: format!("{:x}", md5::compute(name.as_bytes())),
+            hash: {
+                let mut h = DefaultHasher::new();
+                name.hash(&mut h);
+                format!("{:x}", h.finish())
+            },
         }
     }
 
